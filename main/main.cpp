@@ -1,75 +1,76 @@
+#include <Arduino.h>
+#include <BLE2902.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <BLE2902.h>
+
 #include "PacketIdInfo.h"
 #include "tpms.h"
 
-
 #define SERVICE_UUID "00001ff8-0000-1000-8000-00805f9b34fb"
-#define CANBUS_MAIN_UUID "0001"  // UUID 16 bits pour la caractéristique principale
-#define CANBUS_FILTER_UUID "0002"  // UUID 16 bits pour la caractéristique de filtre
+#define CANBUS_MAIN_UUID "0001"
+#define CANBUS_FILTER_UUID "0002"
 
-BLEServer* pServer;
-BLEAdvertising* pAdvertising;
+BLEServer* pServer = nullptr;
+BLEAdvertising* pAdvertising = nullptr;
 
-BLECharacteristic* canBusMainCharacteristic;
-BLECharacteristic* canBusFilterCharacteristic;
+BLECharacteristic* canBusMainCharacteristic = nullptr;
+BLECharacteristic* canBusFilterCharacteristic = nullptr;
 
 PacketIdInfo canBusPacketIdInfo;
 bool canBusAllowUnknownPackets = false;
-uint32_t canBusLastNotifyMs = 0;
-boolean isCanBusConnected = false;
+bool isCanBusConnected = false;
 
-
-uint8_t tempData[20];
+uint8_t tempData[20] = {};
 unsigned long lastSendTime = 0;
 unsigned long lastNotifyTime = 0;
-const long sendInterval = 1000; // 1 Hz
+const long sendInterval = 1000;
 
+void startRC();
+void sendTyreData();
 
 class FilterCallback : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* pCharacteristic) {
+  void onWrite(BLECharacteristic* pCharacteristic) override {
     String value = pCharacteristic->getValue();
-    if (value.length() < 1) return;
-    uint8_t command = value[0];
+    if (value.length() < 1) {
+      return;
+    }
+
+    const uint8_t command = value[0];
     switch (command) {
-      case 0x00: // DENY_ALL
+      case 0x00:
         if (value.length() == 1) {
           canBusPacketIdInfo.reset();
           canBusAllowUnknownPackets = false;
         }
         break;
-      case 0x01: // ALLOW_ALL
+
+      case 0x01:
         if (value.length() == 3) {
           canBusPacketIdInfo.reset();
-          canBusPacketIdInfo.setDefaultNotifyInterval(sendInterval); // Forcer à 20 ms
+          canBusPacketIdInfo.setDefaultNotifyInterval(sendInterval);
           canBusAllowUnknownPackets = true;
         }
         break;
-      case 0x02: // ADD_PID
+
+      case 0x02:
         if (value.length() == 7) {
-          uint16_t notifyIntervalMs = value[1] << 8 | value[2];
-          uint32_t pid = value[3] << 24 | value[4] << 16 | value[5] << 8 | value[6];
-          canBusPacketIdInfo.setNotifyInterval(pid, sendInterval); // Forcer à 20 ms
+          const uint32_t pid = value[3] << 24 | value[4] << 16 | value[5] << 8 | value[6];
+          canBusPacketIdInfo.setNotifyInterval(pid, sendInterval);
         }
         break;
     }
   }
 };
 
-
-
 void startAdvertising() {
   pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinInterval(0x20); // 20 ms
-  pAdvertising->setMaxInterval(0x40); // 40 ms
+  pAdvertising->setMinInterval(0x20);
+  pAdvertising->setMaxInterval(0x40);
   pAdvertising->start();
 }
-
-
 
 void setup() {
   Serial.begin(115200);
@@ -79,46 +80,42 @@ void setup() {
   startTpms();
 }
 
-
 void startRC() {
   BLEDevice::init("RC DIY SIM");
   pServer = BLEDevice::createServer();
+
   BLEService* pService = pServer->createService(SERVICE_UUID);
   canBusMainCharacteristic = pService->createCharacteristic(
     CANBUS_MAIN_UUID,
     BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
   );
   canBusMainCharacteristic->addDescriptor(new BLE2902());
+
   canBusFilterCharacteristic = pService->createCharacteristic(
     CANBUS_FILTER_UUID,
     BLECharacteristic::PROPERTY_WRITE
   );
   canBusFilterCharacteristic->setCallbacks(new FilterCallback());
+
   pService->start();
   startAdvertising();
 }
 
-
 void sendTyreData() {
-  unsigned long currentTime = millis();
-
-  checkTpms();
-
-  if (currentTime - lastNotifyTime < sendInterval) return; // Respecter l'intervalle de notification
+  const unsigned long currentTime = millis();
+  if (currentTime - lastNotifyTime < sendInterval) {
+    return;
+  }
   lastNotifyTime = currentTime;
 
-  PacketIdInfoItem* infoItem;
-  uint32_t packetId;
+  for (int sensorIndex = 0; sensorIndex < NUMSENSORS; ++sensorIndex) {
+    const uint32_t packetId = sensorIndex + 1;
+    const uint16_t pressureInt = static_cast<uint16_t>(pressureBAR[sensorIndex] * 100.0f);
+    tempData[4] = static_cast<uint8_t>((pressureInt >> 8) & 0xFF);
+    tempData[5] = static_cast<uint8_t>(pressureInt & 0xFF);
+    reinterpret_cast<uint32_t*>(tempData)[0] = packetId;
 
-  for (int i=0; i<NUMSENSORS; i++) {
-    packetId = i + 1;
-    uint16_t pressureInt = (uint16_t)(pressureBAR[i]*100.0);
-    uint8_t pressureHigh = (pressureInt >> 8) & 0xFF;
-    uint8_t pressureLow = pressureInt & 0xFF;
-    tempData[4] = pressureHigh;
-    tempData[5] = pressureLow;
-    ((uint32_t*)tempData)[0] = packetId;
-    infoItem = canBusPacketIdInfo.findItem(packetId, canBusAllowUnknownPackets);
+    PacketIdInfoItem* infoItem = canBusPacketIdInfo.findItem(packetId, canBusAllowUnknownPackets);
     if (infoItem && infoItem->shouldNotify()) {
       canBusMainCharacteristic->setValue(tempData, 6);
       canBusMainCharacteristic->notify();
@@ -126,11 +123,12 @@ void sendTyreData() {
     }
   }
 
-  for (int i=0; i<NUMSENSORS; i++) {
-    packetId = i + 8;
-    tempData[4] = (uint8_t)temperature[i];
-    ((uint32_t*)tempData)[0] = packetId;
-    infoItem = canBusPacketIdInfo.findItem(packetId, canBusAllowUnknownPackets);
+  for (int sensorIndex = 0; sensorIndex < NUMSENSORS; ++sensorIndex) {
+    const uint32_t packetId = sensorIndex + 8;
+    tempData[4] = static_cast<uint8_t>(temperature[sensorIndex]);
+    reinterpret_cast<uint32_t*>(tempData)[0] = packetId;
+
+    PacketIdInfoItem* infoItem = canBusPacketIdInfo.findItem(packetId, canBusAllowUnknownPackets);
     if (infoItem && infoItem->shouldNotify()) {
       canBusMainCharacteristic->setValue(tempData, 5);
       canBusMainCharacteristic->notify();
@@ -139,10 +137,10 @@ void sendTyreData() {
   }
 }
 
-
-
 void loop() {
-  unsigned long currentTime = millis();
+  checkTpms();
+
+  const unsigned long currentTime = millis();
   if (currentTime - lastSendTime >= sendInterval) {
     lastSendTime = currentTime;
     if (isCanBusConnected) {
@@ -162,7 +160,3 @@ void loop() {
     startAdvertising();
   }
 }
-
-
-
-// ----------------------
