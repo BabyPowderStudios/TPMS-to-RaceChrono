@@ -5,7 +5,7 @@ The firmware receives TPMS packets with a CC1101 module and keeps the RaceChrono
 
 
 Thanks to these:  
-https://github.com/MagnusThome/TPMS-to-RaceChrono
+https://github.com/MagnusThome/TPMS-to-RaceChrono  
 https://github.com/NicoEFI/Racechrono-ESP32-S3  
 https://github.com/andi38/TPMS  
 https://github.com/upiir/arduino_tpms_tire_pressure  
